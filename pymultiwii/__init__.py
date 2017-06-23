@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 
-"""multiwii.py: Handles Multiwii Serial Protocol."""
+"""Handles Multiwii Serial Protocol."""
 
 __author__ = "Aldo Vargas"
+__author__ = "William Koch"
 __copyright__ = "Copyright 2017 Altax.net"
 
 __license__ = "GPL"
@@ -13,13 +14,15 @@ __status__ = "Development"
 
 
 import serial, time, struct
+import socket
+from urlparse import urlparse
 import abc
 
-class CommunicationProtocol(object):
+class MultiwiiCommChannel(object):
     __metaclass__ = abc.ABCMeta
 
     @abc.abstractmethod
-    def open(self):
+    def connect(self):
         """ Open connection """
         return 
 
@@ -29,11 +32,16 @@ class CommunicationProtocol(object):
         return 
 
     @abc.abstractmethod
-    def write(self, cmd):
-        """ Write the cmd and return any response """
+    def write(self, message):
+        """ Write the message to the channel """
         return 
 
-class MultiWiiSerialProtocol(CommunicationProtocol):
+    @abc.abstractmethod
+    def read(self):
+        """ Read data from channel """
+        return 
+
+class MultiWiiSerialChannel(MultiwiiCommChannel):
 
     def __init__(self, dstAddress, baudrate = 115200):
         self.ser = serial.Serial()
@@ -48,9 +56,11 @@ class MultiWiiSerialProtocol(CommunicationProtocol):
         self.ser.dsrdtr = False
         self.ser.writeTimeout = 2
 
-    def open(self):
+    def connect(self):
         """Time to wait until the board becomes operational"""
         wakeup = 2
+        #TODO Need to replace this with proper logging
+        self.PRINT = 1
         try:
             self.ser.open()
             if self.PRINT:
@@ -64,8 +74,11 @@ class MultiWiiSerialProtocol(CommunicationProtocol):
         except Exception, error:
             print "\n\nError opening "+self.ser.port+" port.\n"+str(error)+"\n\n"
 
-    def write(self, cmd):
-        return self.ser.write(cmd)
+    def close(self):
+        pass
+
+    def write(self, message):
+        return self.ser.write(message)
 
     def read(self):
         while True:
@@ -81,6 +94,42 @@ class MultiWiiSerialProtocol(CommunicationProtocol):
         self.ser.flushOutput()
         return temp
 
+class MultiwiiTCPChannel(MultiwiiCommChannel):
+    # TODO Whats the max size we can expect to receive from the FC?
+    BUFFER_SIZE = 1024
+
+    def __init__(self, ipaddr, port):
+        self.ipaddr = ipaddr
+        self.port = port
+
+        self.data_recv = None
+
+    def connect(self):
+        self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.s.connect((self.ipaddr, self.port))
+
+    def close(self):
+        if not self.s:
+            raise Exception("Cannot close, socket never created")
+        self.s.close()
+
+    def write(self, message):
+        if not self.s:
+            raise Exception("Cannot close, socket never created")
+        self.s.send(message)
+
+        # So the interface is the same as serial we will require this in 
+        # in two steps for now. If there is a response, it will be cached 
+        # and a read will have to be made
+        self.data_recv = self.s.recv(MultiwiiTCPChannel.BUFFER_SIZE)
+    
+    def read(self):
+        if not self.data_recv:
+            raise Exception("Have not received data, call write first")
+        datalength = struct.unpack('<b', self.data_recv[3])[0]
+        code = struct.unpack('<b', self.data_recv[4])[0]
+        data = self.data_recv[5 : 5 + datalength]
+        return struct.unpack('<'+'h'*(datalength/2),data)
 
 class MultiWii:
 
@@ -121,10 +170,9 @@ class MultiWii:
     IS_SERIAL = 211
     DEBUG = 254
 
-    self.protocol = None
 
     """Class initialization"""
-    def __init__(self, fcAddress):
+    def __init__(self, fc_address):
 
         """Global variables of data"""
         self.PIDcoef = {'rp':0,'ri':0,'rd':0,'pp':0,'pi':0,'pd':0,'yp':0,'yi':0,'yd':0}
@@ -139,10 +187,22 @@ class MultiWii:
         self.elapsed = 0
         self.PRINT = 1
 
-        self.protocol = MultiWiiSerialProtocol(fcAddress)
-        self.protocol.open()
+        self.channel = None
+        parsed_address = urlparse(fc_address)
+        if parsed_address.scheme == "tcp":
+            self.channel = MultiwiiTCPChannel(parsed_address.hostname, parsed_address.port)
+        else:
+            self.channel = MultiWiiSerialChannel(fc_address)
         
+        #self.connect()
 
+    def connect(self):
+        """ Connect to the flight controller through the defined communication channel """
+        self.channel.connect()
+
+    def close(self):
+        """ Close the connection to the flight controller """
+        self.channel.close()
 
     """Function for sending a command to the board"""
     def sendCMD(self, data_length, code, data):
@@ -152,12 +212,10 @@ class MultiWii:
             checksum = checksum ^ ord(i)
         total_data.append(checksum)
         try:
-            b = None
-            b = self.protocol.write(struct.pack('<3c2B%dHB' % len(data), *total_data))
+            self.channel.write(struct.pack('<3c2B%dHB' % len(data), *total_data))
         except Exception, error:
-            #print "\n\nError in sendCMD."
+            print "sendCMD error ", error
             #print "("+str(error)+")\n\n"
-            pass
 
     """Function for sending a command to the board and receive attitude"""
     """
@@ -179,8 +237,8 @@ class MultiWii:
         try:
             start = time.time()
             b = None
-            b = self.protocol.write(struct.pack('<3c2B%dHB' % len(data), *total_data))
-            temp = self.protocol.read(cmd)
+            b = self.channel.write(struct.pack('<3c2B%dHB' % len(data), *total_data))
+            temp = self.channel.read(cmd)
 
             elapsed = time.time() - start
             self.attitude['angx']=float(temp[0]/10.0)
@@ -239,7 +297,7 @@ class MultiWii:
         try:
             start = time.time()
             self.sendCMD(0,cmd,[])
-            temp = self.protocol.read(cmd)
+            temp = self.channel.read()
 
             elapsed = time.time() - start
             if cmd == MultiWii.ATTITUDE:
@@ -307,8 +365,7 @@ class MultiWii:
             else:
                 return "No return error!"
         except Exception, error:
-            #print error
-            pass
+            print "getData erorr", error
 
     """Function to receive a data packet from the board. Note: easier to use on threads"""
     def getDataInf(self, cmd):
@@ -320,10 +377,10 @@ class MultiWii:
         try:
             start = time.time()
             self.sendCMD(0,self.ATTITUDE,[])
-            temp = self.protocol.read(cmd)
+            temp = self.channel.read(cmd)
 
             self.sendCMD(0,self.RC,[])
-            temp2 = self.protocol.read(cmd)
+            temp2 = self.channel.read(cmd)
 
             elapsed = time.time() - start
 
