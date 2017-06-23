@@ -30,6 +30,19 @@ board = MultiWii(serialPort)
 
 With the example above, you will see a stream of data on your terminal.
 
+pyMultiWii also includes support for communicating over TCP to communicate with
+MSP flight controllers built as software in the loop (SITL). Simply change to a
+TCP address to communicate over TCP. 
+
+```
+from pymultiwii import MultiWii
+
+tcpAddress = "tcp://127.0.0.1:5761"
+board = MultiWii(tcpAddress)
+    while True:
+		print board.getData(MultiWii.ATTITUDE)
+```
+
 [![ScreenShot](http://img.youtube.com/vi/TpcQ-TOuOA0/0.jpg)](https://www.youtube.com/watch?v=TpcQ-TOuOA0)
 
 ## MultiWii Serial Protocol
