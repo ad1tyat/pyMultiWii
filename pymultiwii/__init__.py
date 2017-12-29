@@ -15,12 +15,10 @@ __status__ = "Development"
 
 import serial, time, struct
 import socket
-from urlparse import urlparse
+from urllib.parse import urlparse
 import abc
 
-class MultiwiiCommChannel(object):
-    __metaclass__ = abc.ABCMeta
-
+class MultiwiiCommChannel(object, metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def connect(self):
         """ Open connection """
@@ -64,15 +62,15 @@ class MultiWiiSerialChannel(MultiwiiCommChannel):
         try:
             self.ser.open()
             if self.PRINT:
-                print "Waking up board on "+self.ser.port+"..."
+                print("Waking up board on "+self.ser.port+"...")
             for i in range(1,wakeup):
                 if self.PRINT:
-                    print wakeup-i
+                    print(wakeup-i)
                     time.sleep(1)
                 else:
                     time.sleep(1)
-        except Exception, error:
-            print "\n\nError opening "+self.ser.port+" port.\n"+str(error)+"\n\n"
+        except Exception as error:
+            print("\n\nError opening "+self.ser.port+" port.\n"+str(error)+"\n\n")
 
     def close(self):
         pass
@@ -118,7 +116,7 @@ class MultiwiiTCPChannel(MultiwiiCommChannel):
             raise Exception("Cannot close, socket never created")
         self.s.send(message)
 
-        # So the interface is the same as serial we will require this in 
+        # The interface is the same as serial we will require this in 
         # in two steps for now. If there is a response, it will be cached 
         # and a read will have to be made
         self.data_recv = self.s.recv(MultiwiiTCPChannel.BUFFER_SIZE)
@@ -126,10 +124,18 @@ class MultiwiiTCPChannel(MultiwiiCommChannel):
     def read(self):
         if not self.data_recv:
             raise Exception("Have not received data, call write first")
-        datalength = struct.unpack('<b', self.data_recv[3])[0]
-        code = struct.unpack('<b', self.data_recv[4])[0]
+        #print ("data=", self.data_recv)
+        #print ("data=", bytearray(self.data_recv))
+        #print ("type= ", type(l))
+        #datalength = struct.unpack('<b', self.data_recv[3])#[0]
+        data = bytearray(self.data_recv)
+        datalength = data[3]
+        #print ("datalength = ", datalength)
+        code = data[4]
+        #print ("code = ", code)
+        #code = struct.unpack('<b', self.data_recv[4])[0]
         data = self.data_recv[5 : 5 + datalength]
-        return struct.unpack('<'+'h'*(datalength/2),data)
+        return struct.unpack('<'+'h'*int(datalength/2),data)
 
 class MultiWii:
 
@@ -207,14 +213,15 @@ class MultiWii:
     """Function for sending a command to the board"""
     def sendCMD(self, data_length, code, data):
         checksum = 0
-        total_data = ['$', 'M', '<', data_length, code] + data
+        total_data = [b'$', b'M', b'<', data_length, code] + data
         for i in struct.pack('<2B%dH' % len(data), *total_data[3:len(total_data)]):
-            checksum = checksum ^ ord(i)
+            checksum = checksum ^ i#ord(i)
         total_data.append(checksum)
-        try:
-            self.channel.write(struct.pack('<3c2B%dHB' % len(data), *total_data))
-        except Exception, error:
-            print "sendCMD error ", error
+        #try:
+        # Pack as little endian, 3 character, 2 unsigned char, length of data double float,
+        self.channel.write(struct.pack('<3c2B%dHB' % len(data), *total_data))
+        #except Exception as error:
+        #    print("sendCMD error ", error)
             #print "("+str(error)+")\n\n"
 
     """Function for sending a command to the board and receive attitude"""
@@ -230,9 +237,9 @@ class MultiWii:
     """
     def sendCMDreceiveATT(self, data_length, code, data):
         checksum = 0
-        total_data = ['$', 'M', '<', data_length, code] + data
+        total_data = [b'$', b'M', b'<', data_length, code] + data
         for i in struct.pack('<2B%dH' % len(data), *total_data[3:len(total_data)]):
-            checksum = checksum ^ ord(i)
+            checksum = checksum ^ i # ord(i)
         total_data.append(checksum)
         try:
             start = time.time()
@@ -247,7 +254,7 @@ class MultiWii:
             self.attitude['elapsed']=round(elapsed,3)
             self.attitude['timestamp']="%0.2f" % (time.time(),) 
             return self.attitude
-        except Exception, error:
+        except Exception as error:
             #print "\n\nError in sendCMDreceiveATT."
             #print "("+str(error)+")\n\n"
             pass
@@ -288,84 +295,88 @@ class MultiWii:
         for i in np.arange(1,len(pd),2):
             nd.append(pd[i]+pd[i+1]*256)
         data = pd
-        print "PID sending:",data
+        print("PID sending:",data)
         self.sendCMD(30,MultiWii.SET_PID,data)
         self.sendCMD(0,MultiWii.EEPROM_WRITE,[])
 
     """Function to receive a data packet from the board"""
     def getData(self, cmd):
-        try:
-            start = time.time()
-            self.sendCMD(0,cmd,[])
-            temp = self.channel.read()
+        #try:
+        start = time.time()
+        self.sendCMD(0,cmd,[])
+        temp = self.channel.read()
 
-            elapsed = time.time() - start
-            if cmd == MultiWii.ATTITUDE:
-                self.attitude['angx']=float(temp[0]/10.0)
-                self.attitude['angy']=float(temp[1]/10.0)
-                self.attitude['heading']=float(temp[2])
-                self.attitude['elapsed']=round(elapsed,3)
-                self.attitude['timestamp']="%0.2f" % (time.time(),) 
-                return self.attitude
-            elif cmd == MultiWii.ALTITUDE:
-                self.altitude['estalt']=float(temp[0])
-                self.altitude['vario']=float(temp[1])
-                self.attitude['elapsed']=round(elapsed,3)
-                self.attitude['timestamp']="%0.2f" % (time.time(),) 
-                return self.rcChannels
-            elif cmd == MultiWii.RC:
-                self.rcChannels['roll']=temp[0]
-                self.rcChannels['pitch']=temp[1]
-                self.rcChannels['yaw']=temp[2]
-                self.rcChannels['throttle']=temp[3]
-                self.rcChannels['elapsed']=round(elapsed,3)
-                self.rcChannels['timestamp']="%0.2f" % (time.time(),)
-                return self.rcChannels
-            elif cmd == MultiWii.RAW_IMU:
-                self.rawIMU['ax']=float(temp[0])
-                self.rawIMU['ay']=float(temp[1])
-                self.rawIMU['az']=float(temp[2])
-                self.rawIMU['gx']=float(temp[3])
-                self.rawIMU['gy']=float(temp[4])
-                self.rawIMU['gz']=float(temp[5])
-                self.rawIMU['mx']=float(temp[6])
-                self.rawIMU['my']=float(temp[7])
-                self.rawIMU['mz']=float(temp[8])
-                self.rawIMU['elapsed']=round(elapsed,3)
-                self.rawIMU['timestamp']="%0.2f" % (time.time(),)
-                return self.rawIMU
-            elif cmd == MultiWii.MOTOR:
-                self.motor['m1']=float(temp[0])
-                self.motor['m2']=float(temp[1])
-                self.motor['m3']=float(temp[2])
-                self.motor['m4']=float(temp[3])
-                self.motor['elapsed']="%0.3f" % (elapsed,)
-                self.motor['timestamp']="%0.2f" % (time.time(),)
-                return self.motor
-            elif cmd == MultiWii.PID:
-                dataPID=[]
-                if len(temp)>1:
-                    d=0
-                    for t in temp:
-                        dataPID.append(t%256)
-                        dataPID.append(t/256)
-                    for p in [0,3,6,9]:
-                        dataPID[p]=dataPID[p]/10.0
-                        dataPID[p+1]=dataPID[p+1]/1000.0
-                    self.PIDcoef['rp']= dataPID=[0]
-                    self.PIDcoef['ri']= dataPID=[1]
-                    self.PIDcoef['rd']= dataPID=[2]
-                    self.PIDcoef['pp']= dataPID=[3]
-                    self.PIDcoef['pi']= dataPID=[4]
-                    self.PIDcoef['pd']= dataPID=[5]
-                    self.PIDcoef['yp']= dataPID=[6]
-                    self.PIDcoef['yi']= dataPID=[7]
-                    self.PIDcoef['yd']= dataPID=[8]
-                return self.PIDcoef
-            else:
-                return "No return error!"
-        except Exception, error:
-            print "getData erorr", error
+        elapsed = time.time() - start
+        if cmd == MultiWii.ATTITUDE:
+            self.attitude['angx']=float(temp[0]/10.0)
+            self.attitude['angy']=float(temp[1]/10.0)
+            self.attitude['heading']=float(temp[2])
+            self.attitude['elapsed']=round(elapsed,3)
+            self.attitude['timestamp']="%0.2f" % (time.time(),) 
+            return self.attitude
+        elif cmd == MultiWii.ALTITUDE:
+            self.altitude['estalt']=float(temp[0])
+            self.altitude['vario']=float(temp[1])
+            self.attitude['elapsed']=round(elapsed,3)
+            self.attitude['timestamp']="%0.2f" % (time.time(),) 
+            return self.rcChannels
+        elif cmd == MultiWii.RC:
+            self.rcChannels['roll']=temp[0]
+            self.rcChannels['pitch']=temp[1]
+            self.rcChannels['yaw']=temp[2]
+            self.rcChannels['throttle']=temp[3]
+            self.rcChannels['aux1']=temp[4]
+            self.rcChannels['aux2']=temp[5]
+            self.rcChannels['aux3']=temp[6]
+            self.rcChannels['aux4']=temp[7]
+            self.rcChannels['elapsed']=round(elapsed,3)
+            self.rcChannels['timestamp']="%0.2f" % (time.time(),)
+            return self.rcChannels
+        elif cmd == MultiWii.RAW_IMU:
+            self.rawIMU['ax']=float(temp[0])
+            self.rawIMU['ay']=float(temp[1])
+            self.rawIMU['az']=float(temp[2])
+            self.rawIMU['gx']=float(temp[3])
+            self.rawIMU['gy']=float(temp[4])
+            self.rawIMU['gz']=float(temp[5])
+            self.rawIMU['mx']=float(temp[6])
+            self.rawIMU['my']=float(temp[7])
+            self.rawIMU['mz']=float(temp[8])
+            self.rawIMU['elapsed']=round(elapsed,3)
+            self.rawIMU['timestamp']="%0.2f" % (time.time(),)
+            return self.rawIMU
+        elif cmd == MultiWii.MOTOR:
+            self.motor['m1']=float(temp[0])
+            self.motor['m2']=float(temp[1])
+            self.motor['m3']=float(temp[2])
+            self.motor['m4']=float(temp[3])
+            self.motor['elapsed']="%0.3f" % (elapsed,)
+            self.motor['timestamp']="%0.2f" % (time.time(),)
+            return self.motor
+        elif cmd == MultiWii.PID:
+            dataPID=[]
+            if len(temp)>1:
+                d=0
+                for t in temp:
+                    dataPID.append(t%256)
+                    dataPID.append(t/256)
+                for p in [0,3,6,9]:
+                    dataPID[p]=dataPID[p]/10.0
+                    dataPID[p+1]=dataPID[p+1]/1000.0
+                self.PIDcoef['rp']= dataPID=[0]
+                self.PIDcoef['ri']= dataPID=[1]
+                self.PIDcoef['rd']= dataPID=[2]
+                self.PIDcoef['pp']= dataPID=[3]
+                self.PIDcoef['pi']= dataPID=[4]
+                self.PIDcoef['pd']= dataPID=[5]
+                self.PIDcoef['yp']= dataPID=[6]
+                self.PIDcoef['yi']= dataPID=[7]
+                self.PIDcoef['yd']= dataPID=[8]
+            return self.PIDcoef
+        else:
+            return "No return error!"
+        #except Exception as error:
+        #    print("getData erorr", error)
 
     """Function to receive a data packet from the board. Note: easier to use on threads"""
     def getDataInf(self, cmd):
@@ -397,5 +408,5 @@ class MultiWii:
                 return self.message
             else:
                 return "No return error!"
-        except Exception, error:
-            print error
+        except Exception as error:
+            print(error)
