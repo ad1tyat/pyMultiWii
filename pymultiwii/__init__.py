@@ -17,6 +17,9 @@ import serial, time, struct
 import socket
 from urllib.parse import urlparse
 import abc
+import asyncio
+import logging
+logger = logging.getLogger("pymultiwii")
 
 class MultiwiiCommChannel(object, metaclass=abc.ABCMeta):
     @abc.abstractmethod
@@ -38,6 +41,12 @@ class MultiwiiCommChannel(object, metaclass=abc.ABCMeta):
     def read(self):
         """ Read data from channel """
         return 
+
+    def is_checksum_valid(self, data, checksum):
+        computed = 0
+        for i in data :
+            computed = computed ^ i
+        return computed == checksum
 
 class MultiWiiSerialChannel(MultiwiiCommChannel):
 
@@ -92,6 +101,66 @@ class MultiWiiSerialChannel(MultiwiiCommChannel):
         self.ser.flushOutput()
         return temp
 
+class MultiwiiAsyncIOTCPChannel(MultiwiiCommChannel):
+    def __init__(self, ipaddr, port):
+        self.ipaddr = ipaddr
+        self.port = port
+
+        self.reader = None
+        self.writter = None
+
+
+    def connect(self):
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(self._connect(loop))
+        loop.close()
+
+    async def _connect(self, loop):
+        self.reader, self.writer = await asyncio.open_connection(self.ipaddr, self.port, loop=loop)
+
+    def close(self):
+        pass
+
+    def write(self, message):
+        self.writer.write(message)
+
+    def _parse_payload(self, payload):
+        """ parse packet payload and return fields throw exception is parsing error """
+
+        # Check for preamble
+        logger.debug (payload[:2])
+        if payload[:2] != b'$M':
+            raise Exception("Preable not found")
+
+        # Check direction, indexing bytesarray returns int
+        direction = payload[2]
+        if not (direction == ord('>') or direction == ord('<')):
+            raise Exception("Direction not found")
+
+        datalength = payload[3]
+        logger.debug ("len={}".format(datalength))
+        command = payload[4]
+        logger.debug ("CMD={}".format(command))
+        data = payload[5 : 5 + datalength] 
+        logger.debug ("Data={}".format(data))
+        crc = payload[5 + datalength]
+        logger.debug ("CRC={}".format(crc))
+
+        return (direction, datalength, command, data, crc)
+
+    async def read(self):
+        packet = await self.reader.read(1024)
+        payload = bytes(packet)
+        (direction, datalength, command, data, crc) = self._parse_payload(payload)
+
+        # Check if any data has been corrupted
+        logger.debug ("Size+CMD+DATA={}".format(payload[3: 3 + 1 + 1 + datalength]))
+        if not self.is_checksum_valid(payload[3 : 3 + 1 + 1 + datalength], crc):
+            raise Exception("Checksum not valid!")
+        return data
+
+
+
 class MultiwiiTCPChannel(MultiwiiCommChannel):
     # TODO Whats the max size we can expect to receive from the FC?
     BUFFER_SIZE = 1024
@@ -103,40 +172,93 @@ class MultiwiiTCPChannel(MultiwiiCommChannel):
         self.data_recv = None
 
     def connect(self):
-        self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.s.connect((self.ipaddr, self.port))
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.sock.connect((self.ipaddr, self.port))
+        #self.sock.setblocking(0)
 
     def close(self):
-        if not self.s:
+        if not self.sock:
             raise Exception("Cannot close, socket never created")
         self.s.close()
 
     def write(self, message):
-        if not self.s:
-            raise Exception("Cannot close, socket never created")
-        self.s.send(message)
+        if not self.sock:
+            raise Exception("Cannot write, socket never created")
+        self.sock.send(message)
+
 
         # The interface is the same as serial we will require this in 
         # in two steps for now. If there is a response, it will be cached 
         # and a read will have to be made
-        self.data_recv = self.s.recv(MultiwiiTCPChannel.BUFFER_SIZE)
+        # self.data_recv = self.s.recv(MultiwiiTCPChannel.BUFFER_SIZE)
     
-    def read(self):
-        if not self.data_recv:
-            raise Exception("Have not received data, call write first")
-        #print ("data=", self.data_recv)
-        #print ("data=", bytearray(self.data_recv))
-        #print ("type= ", type(l))
-        #datalength = struct.unpack('<b', self.data_recv[3])#[0]
-        data = bytearray(self.data_recv)
-        datalength = data[3]
-        #print ("datalength = ", datalength)
-        code = data[4]
-        #print ("code = ", code)
-        #code = struct.unpack('<b', self.data_recv[4])[0]
-        data = self.data_recv[5 : 5 + datalength]
-        return struct.unpack('<'+'h'*int(datalength/2),data)
+    def _parse_payload(self, payload):
+        """ parse packet payload and return fields throw exception is parsing error """
 
+        # Check for preamble
+        logger.debug (payload[:2])
+        if payload[:2] != b'$M':
+            raise Exception("Preable not found")
+
+        # Check direction, indexing bytesarray returns int
+        direction = payload[2]
+        if not (direction == ord('>') or direction == ord('<')):
+            raise Exception("Direction not found")
+
+        datalength = payload[3]
+        logger.debug ("len={}".format(datalength))
+        command = payload[4]
+        logger.debug ("CMD={}".format(command))
+        data = payload[5 : 5 + datalength] 
+        logger.debug ("Data={}".format(data))
+        crc = payload[5 + datalength]
+        logger.debug ("CRC={}".format(crc))
+
+        return (direction, datalength, command, data, crc)
+
+    def read(self):
+        """ Read and return data in bytes 
+        General format:
+            <preamble>,<direction>,<size>,<command>,data,<crc>
+        """
+
+
+        # Look for preamble
+        start = time.time()
+        """
+        header = None
+        while True:
+            try:
+                header = self.sock.recv(1)
+            except:
+                pass
+            print("header=", header)
+            if header and header == b'$':
+                break
+
+        packet = None
+        #try:
+        packet = header + self.sock.recv(MultiwiiTCPChannel.BUFFER_SIZE)
+        """
+        packet =  self.sock.recv(MultiwiiTCPChannel.BUFFER_SIZE)
+        #except:
+        #    return
+        payload = bytes(packet)
+        logger.debug("Lapse = {}".format(time.time() - start))
+        logger.debug ("Payload= {}".format(payload))
+
+
+        (direction, datalength, command, data, crc) = self._parse_payload(payload)
+
+        # Check if any data has been corrupted
+        logger.debug ("Size+CMD+DATA={}".format(payload[3: 3 + 1 + 1 + datalength]))
+        if not self.is_checksum_valid(payload[3 : 3 + 1 + 1 + datalength], crc):
+            raise Exception("Checksum not valid!")
+
+        return data
+
+         
 class MultiWii:
 
     """Multiwii Serial Protocol message ID"""
@@ -197,6 +319,8 @@ class MultiWii:
         parsed_address = urlparse(fc_address)
         if parsed_address.scheme == "tcp":
             self.channel = MultiwiiTCPChannel(parsed_address.hostname, parsed_address.port)
+            #self.channel = MultiwiiAsyncIOTCPChannel(parsed_address.hostname, parsed_address.port)
+
         else:
             self.channel = MultiWiiSerialChannel(fc_address)
         
@@ -210,16 +334,19 @@ class MultiWii:
         """ Close the connection to the flight controller """
         self.channel.close()
 
-    """Function for sending a command to the board"""
     def sendCMD(self, data_length, code, data):
+        """Function for sending a command to the board"""
+
         checksum = 0
         total_data = [b'$', b'M', b'<', data_length, code] + data
         for i in struct.pack('<2B%dH' % len(data), *total_data[3:len(total_data)]):
-            checksum = checksum ^ i#ord(i)
+            checksum = checksum ^ i
         total_data.append(checksum)
         #try:
         # Pack as little endian, 3 character, 2 unsigned char, length of data double float,
         self.channel.write(struct.pack('<3c2B%dHB' % len(data), *total_data))
+
+        #self.channel.read()
         #except Exception as error:
         #    print("sendCMD error ", error)
             #print "("+str(error)+")\n\n"
@@ -235,6 +362,11 @@ class MultiWii:
       break;
 
     """
+
+    def setRawRC(self, rcData):
+        self.sendCMD(16, MultiWii.SET_RAW_RC, rcData)
+        self.channel.read()
+
     def sendCMDreceiveATT(self, data_length, code, data):
         checksum = 0
         total_data = [b'$', b'M', b'<', data_length, code] + data
@@ -270,25 +402,6 @@ class MultiWii:
       break;
 
     """
-    def arm(self):
-        timer = 0
-        start = time.time()
-        while timer < 0.5:
-            data = [1500,1500,2000,1000]
-            self.sendCMD(8,MultiWii.SET_RAW_RC,data)
-            time.sleep(0.05)
-            timer = timer + (time.time() - start)
-            start =  time.time()
-
-    def disarm(self):
-        timer = 0
-        start = time.time()
-        while timer < 0.5:
-            data = [1500,1500,1000,1000]
-            self.sendCMD(8,MultiWii.SET_RAW_RC,data)
-            time.sleep(0.05)
-            timer = timer + (time.time() - start)
-            start =  time.time()
     
     def setPID(self,pd):
         nd=[]
@@ -299,11 +412,20 @@ class MultiWii:
         self.sendCMD(30,MultiWii.SET_PID,data)
         self.sendCMD(0,MultiWii.EEPROM_WRITE,[])
 
+    async def _getData(self, cmd):
+        print("sending ", cmd)
+        await self.sendCMD(0, cmd, [])
+        print("reading ")
+        temp = await self.channel.read()
+        print("Data received = ", temp)
+
+
     """Function to receive a data packet from the board"""
     def getData(self, cmd):
         #try:
         start = time.time()
-        self.sendCMD(0,cmd,[])
+        self.sendCMD(0, cmd, [])
+
         temp = self.channel.read()
 
         elapsed = time.time() - start
@@ -373,6 +495,48 @@ class MultiWii:
                 self.PIDcoef['yi']= dataPID=[7]
                 self.PIDcoef['yd']= dataPID=[8]
             return self.PIDcoef
+        elif cmd == MultiWii.BOXIDS:
+            return temp
+        elif cmd == MultiWii.BOXNAMES:
+            return temp
+        elif cmd == MultiWii.STATUS:
+            """ The MultiWii API is out of date with what is implemented by betaflight,
+            https://github.com/betaflight/betaflight/blob/master/src/main/interface/msp.c#L696
+            """
+            
+
+            # unpack up until flight modes becaues
+            # this is dynamic
+            # B=1
+            # H=2
+            # I=4
+            unpacked = struct.unpack("<3HIB2HB", temp[:16])
+            dt = unpacked[0]
+            ic2_error_count = unpacked[1]
+            sensors = unpacked[2]
+            flight_mode_flags = unpacked[3]
+            pid_profile_index = unpacked[4]
+            system_load = unpacked[5]
+            gyro_cycle_time = unpacked[6]
+            size_conditional_flight_mode_flags = unpacked[7]
+
+            unpacked2 = None
+            if size_conditional_flight_mode_flags > 0:
+                unpacked2 = struct.unpack("<{}BBI".format(size_conditional_flight_mode_flags), temp[16:])
+# FIXME This is going to break, flags will be byte array
+                conditional_flight_mode_flags = unpacked2[:size_conditional_flight_mode_flags]
+                num_disarming_flags = unpacked2[size_conditional_flight_mode_flags ]
+                arming_disabled_flags = unpacked2[size_conditional_flight_mode_flags + 1]
+            else:
+                unpacked2 = struct.unpack("<BI", temp[16:])
+
+                num_disarming_flags = unpacked2[0]
+                arming_disabled_flags = unpacked2[1]
+
+            print ("Flight modes =", flight_mode_flags)
+            print ("Arm disabled = ", arming_disabled_flags)
+
+            return temp
         else:
             return "No return error!"
         #except Exception as error:
