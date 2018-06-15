@@ -90,13 +90,13 @@ class MultiWiiSerialChannel(MultiwiiCommChannel):
     def read(self):
         while True:
             header = self.ser.read()
-            if header == '$':
+            if header == b'$':
                 header = header+self.ser.read(2)
                 break
         datalength = struct.unpack('<b', self.ser.read())[0]
         code = struct.unpack('<b', self.ser.read())
         data = self.ser.read(datalength)
-        temp = struct.unpack('<'+'h'*(datalength/2),data)
+        temp = struct.unpack('<'+'h'*(int(datalength/2)),data)
         self.ser.flushInput()
         self.ser.flushOutput()
         return temp
