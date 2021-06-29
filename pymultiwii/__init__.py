@@ -19,9 +19,12 @@ from urllib.parse import urlparse
 import abc
 import asyncio
 import logging
+import numpy as np
+from future.utils import with_metaclass
+
 logger = logging.getLogger("pymultiwii")
 
-class MultiwiiCommChannel(object, metaclass=abc.ABCMeta):
+class MultiwiiCommChannel(with_metaclass(abc.ABCMeta, object)):
     @abc.abstractmethod
     def connect(self):
         """ Open connection """
@@ -180,7 +183,7 @@ class MultiwiiTCPChannel(MultiwiiCommChannel):
     def close(self):
         if not self.sock:
             raise Exception("Cannot close, socket never created")
-        self.s.close()
+        self.sock.close()
 
     def write(self, message):
         if not self.sock:
@@ -255,7 +258,10 @@ class MultiwiiTCPChannel(MultiwiiCommChannel):
         logger.debug ("Size+CMD+DATA={}".format(payload[3: 3 + 1 + 1 + datalength]))
         if not self.is_checksum_valid(payload[3 : 3 + 1 + 1 + datalength], crc):
             raise Exception("Checksum not valid!")
-
+        # else :
+        #     print("payload valid")
+        # print("data")
+        # print(data)
         return data
 
          
